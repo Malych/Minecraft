@@ -1,0 +1,92 @@
+name: Publish serve pack
+
+# Attaches the serve zip to a GitHub Release and writes its SHA-1 into the
+# release body for EmberLoch server.properties (resource-pack + resource-pack-sha1).
+# serve-pack (repo root, one line) names which *.zip is served.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to create or update (e.g. v26.3_1)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve serve zip
+        id: pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f serve-pack ]]; then
+            echo "::error::Missing serve-pack (one line: the zip EmberLoch serves)"
+            exit 1
+          fi
+          ZIP="$(tr -d '[:space:]' < serve-pack)"
+          if [[ -z "$ZIP" || ! -f "$ZIP" ]]; then
+            echo "::error::serve-pack points to missing file: ${ZIP:-<empty>}"
+            exit 1
+          fi
+          SHA1="$(sha1sum "$ZIP" | awk '{print $1}')"
+          {
+            echo "zip=$ZIP"
+            echo "sha1=$SHA1"
+          } >> "$GITHUB_OUTPUT"
+          echo "Serve pack: $ZIP"
+          echo "SHA-1: $SHA1"
+
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${{ github.event.release.tag_name }}"
+          fi
+          if [[ -z "$TAG" ]]; then
+            echo "::error::No release tag"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "$TAG" --notes ""
+          fi
+
+      - name: Upload assets and set release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          ZIP: ${{ steps.pack.outputs.zip }}
+          SHA1: ${{ steps.pack.outputs.sha1 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$SHA1" > "${ZIP}.sha1"
+          NOTES="EmberLoch resource pack (from \`serve-pack\`).
+
+          - **asset:** \`${ZIP}\`
+          - **resource-pack-sha1:** \`${SHA1}\`
+
+          Use the release asset download URL for \`server.properties\` \`resource-pack\`, and the SHA-1 above for \`resource-pack-sha1\`."
+          gh release upload "$TAG" "$ZIP" "${ZIP}.sha1" --clobber
+          gh release edit "$TAG" --notes "$NOTES"
